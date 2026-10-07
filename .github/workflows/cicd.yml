@@ -18,7 +18,6 @@ on:
 permissions:
   contents: read
 
-# Không để hai pipeline release cùng lúc.
 concurrency:
   group: income-model-${{ github.ref }}
   cancel-in-progress: false
@@ -141,7 +140,7 @@ jobs:
           PYEOF
 
       # ----------------------------------------------------------
-      # DVC PULL FROM S3
+      # DVC PULL
       # ----------------------------------------------------------
       - name: Pull training data with DVC
         run: |
@@ -187,16 +186,13 @@ jobs:
         run: python src/train.py
 
       # ----------------------------------------------------------
-      # BONUS 3: PRECISION / RECALL / CONFUSION MATRIX
+      # BONUS 3: METRICS / CONFUSION MATRIX
       # ----------------------------------------------------------
       - name: Print class metrics and confusion matrix
         run: cat outputs/detail.txt
 
       # ----------------------------------------------------------
-      # SAVE CANDIDATE
-      #
-      # Model CHƯA được đưa lên production ở bước này.
-      # Quality Gate phải pass trước.
+      # SAVE CANDIDATE ARTIFACTS
       # ----------------------------------------------------------
       - name: Save candidate artifacts
         uses: actions/upload-artifact@v4
@@ -219,6 +215,11 @@ jobs:
 
     env:
       ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+
+      # QUAN TRỌNG:
+      # scripts/s3_client.py cần biến này khi Quality Gate chạy
+      STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
+
       AWS_DEFAULT_REGION: ap-southeast-2
 
     steps:
@@ -235,12 +236,8 @@ jobs:
 
       # ----------------------------------------------------------
       # AWS AUTHENTICATION
-      #
-      # Job này là runner mới nên phải cấu hình lại.
       # ----------------------------------------------------------
       - name: Configure AWS credentials
-        env:
-          STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
         run: |
           python - <<'PYEOF'
           import json
@@ -306,7 +303,7 @@ jobs:
           PYEOF
 
       # ----------------------------------------------------------
-      # DOWNLOAD CANDIDATE FROM TRAIN JOB
+      # DOWNLOAD CANDIDATE
       # ----------------------------------------------------------
       - name: Download candidate artifacts
         uses: actions/download-artifact@v4
@@ -318,7 +315,7 @@ jobs:
       # QUALITY GATE
       #
       # - F1 >= 0.65
-      # - Bonus rollback: so với model production hiện tại
+      # - So sánh với model production trước đó
       # ----------------------------------------------------------
       - name: Check minimum F1 and rollback gate
         env:
@@ -335,6 +332,11 @@ jobs:
 
     env:
       ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+
+      # QUAN TRỌNG:
+      # scripts/publish_artifacts.py / s3_client.py cần biến này
+      STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
+
       AWS_DEFAULT_REGION: ap-southeast-2
 
     steps:
@@ -351,12 +353,8 @@ jobs:
 
       # ----------------------------------------------------------
       # AWS AUTHENTICATION
-      #
-      # Release cũng là runner riêng nên cần cấu hình lại.
       # ----------------------------------------------------------
       - name: Configure AWS credentials
-        env:
-          STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
         run: |
           python - <<'PYEOF'
           import json
@@ -422,7 +420,7 @@ jobs:
           PYEOF
 
       # ----------------------------------------------------------
-      # DOWNLOAD MODEL APPROVED BY QUALITY GATE
+      # DOWNLOAD APPROVED ARTIFACTS
       # ----------------------------------------------------------
       - name: Download gate-approved artifacts
         uses: actions/download-artifact@v4
@@ -439,16 +437,12 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
-
           source: src/serve.py
           target: /home/${{ secrets.SERVER_USER }}/src
           strip_components: 1
 
       # ----------------------------------------------------------
-      # PUBLISH APPROVED MODEL + REPORT TO S3
-      #
-      # artifacts/current/model.joblib
-      # artifacts/current/report.json
+      # PUBLISH MODEL + REPORT TO S3
       # ----------------------------------------------------------
       - name: Publish model bundle and current report to S3
         env:
@@ -456,7 +450,7 @@ jobs:
         run: python -m scripts.publish_artifacts
 
       # ----------------------------------------------------------
-      # DEPLOY / RESTART FASTAPI
+      # RESTART FASTAPI
       # ----------------------------------------------------------
       - name: Restart service and check health
         uses: appleboy/ssh-action@v1.0.3
