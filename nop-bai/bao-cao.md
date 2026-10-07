@@ -27,13 +27,13 @@ HƯỚNG DẪN - đọc rồi XÓA TOÀN BỘ các khối chú thích này sau k
 
 | Lần chạy | n_estimators | learning_rate | max_depth | f1_score | accuracy |
 |---|---|---|---|---|---|
-| 1 | ___ | ___ | ___ | ___ | ___ |
-| 2 | ___ | ___ | ___ | ___ | ___ |
-| 3 | ___ | ___ | ___ | ___ | ___ |
+| 1 | 100 | 0.1| 3 | 0.7109004739336493| 0.878|
+| 2 | 50 | 0.05 | 2| 0.6051282051282051 | 0.846 |
+| 3 | 200 | 0.1 | 5 |0.7149321266968326 | 0.874 |
 
-**Bộ siêu tham số đã chọn:** `n_estimators=___`, `learning_rate=___`, `max_depth=___`.
+**Bộ siêu tham số đã chọn:** `n_estimators=200`, `learning_rate=0.1`, `max_depth=5`.
 
-**Lý do:** ___
+**Lý do:** Run 3 có `f1_score=0.7149`, cao nhất trong ba run và vượt ngưỡng 0.65; run mặc định đạt 0.7109, còn cấu hình nông đạt 0.6051. F1 được dùng để chọn vì nó đánh giá precision và recall của lớp dương `target=1`, nên phản ánh tốt hơn khả năng nhận diện người có thu nhập trên 50K. Accuracy cao nhất thuộc run 1 (0.878), không phải run 3 (0.874), vì vậy chọn theo accuracy sẽ không chọn được mô hình có F1 cao nhất. Run 2 giảm đồng thời số cây, learning rate và độ sâu nên F1 thấp hơn; từ các run này chưa thể tách riêng ảnh hưởng của từng tham số. Giảm learning rate thường cần tăng số cây; run 3 giữ learning rate 0.1 nhưng tăng số cây và độ sâu, cải thiện F1 0.004 so với mặc định.
 
 <!--
 Trả lời trong phần Lý do:
