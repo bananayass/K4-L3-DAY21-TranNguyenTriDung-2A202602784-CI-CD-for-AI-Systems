@@ -70,14 +70,19 @@ def train(
 
         positive_class_rate = float(y_train.mean())
         positive_rate_delta = positive_class_rate - REFERENCE_POSITIVE_RATE
+        positive_rate_drift = (
+            abs(positive_rate_delta) > POSITIVE_RATE_DRIFT_THRESHOLD
+        )
         mlflow.log_metric("positive_class_rate", positive_class_rate)
-        if abs(positive_rate_delta) > POSITIVE_RATE_DRIFT_THRESHOLD:
+        print(f"positive_class_rate = {positive_class_rate:.4f}")
+        print(f"reference = {REFERENCE_POSITIVE_RATE:.3f}")
+        print(f"difference = {abs(positive_rate_delta):.4f}")
+        print(f"drift_threshold = {POSITIVE_RATE_DRIFT_THRESHOLD:.4f}")
+        if positive_rate_drift:
             print(
-                "WARNING: positive class rate drift detected: "
-                f"train={positive_class_rate:.4f}, "
-                f"reference={REFERENCE_POSITIVE_RATE:.4f}, "
-                f"deviation={positive_rate_delta:+.4f} "
-                "(threshold=0.0500)."
+                "WARNING: data drift detected "
+                f"(difference={abs(positive_rate_delta):.4f} > "
+                f"threshold={POSITIVE_RATE_DRIFT_THRESHOLD:.4f})."
             )
 
         model = GradientBoostingClassifier(**params, random_state=42)
@@ -171,17 +176,17 @@ def train(
             f"F1 score: {f1:.4f}",
             f"F1 at default threshold 0.50: {default_f1:.4f}",
             threshold_comparison,
-            "Confusion matrix (rows=true [0, 1], columns=predicted [0, 1]):",
-            f"[[{int(matrix[0, 0])}, {int(matrix[0, 1])}],\n"
-            f" [{int(matrix[1, 0])}, {int(matrix[1, 1])}]]",
-            "Precision and recall by class:",
+            "Confusion Matrix (rows=true [0, 1], columns=predicted [0, 1]):",
+            f"[[TN={int(matrix[0, 0])}, FP={int(matrix[0, 1])}],\n"
+            f" [FN={int(matrix[1, 0])}, TP={int(matrix[1, 1])}]]",
         ]
         for label, precision, recall in zip(
             [0, 1], class_precision, class_recall
         ):
             detail_lines.append(
-                f"class {label}: precision={precision:.4f}, "
-                f"recall={recall:.4f}"
+                f"Class {label}:\n"
+                f"  precision = {precision:.4f}\n"
+                f"  recall = {recall:.4f}"
             )
         detail_text = "\n".join(detail_lines) + "\n"
         with open("outputs/detail.txt", "w", encoding="utf-8") as detail_file:
