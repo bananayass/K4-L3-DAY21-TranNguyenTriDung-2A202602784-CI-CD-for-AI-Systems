@@ -7,14 +7,21 @@ on:
       - ".dvc/**"
       - "data/**.dvc"
       - "src/**.py"
+      - "scripts/**.py"
       - "tests/**.py"
       - "params.yaml"
       - "requirements.txt"
       - ".github/workflows/cicd.yml"
+
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Không để hai pipeline release cùng lúc.
+concurrency:
+  group: income-model-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # ============================================================
@@ -49,9 +56,7 @@ jobs:
 
     env:
       ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
-
-    outputs:
-      f1: ${{ steps.read_report.outputs.f1 }}
+      AWS_DEFAULT_REGION: ap-southeast-2
 
     steps:
       - name: Checkout repository
@@ -66,13 +71,7 @@ jobs:
         run: pip install -r requirements.txt
 
       # ----------------------------------------------------------
-      # AWS authentication
-      # STORAGE_CREDENTIALS format:
-      #
-      # {
-      #   "aws_access_key_id": "...",
-      #   "aws_secret_access_key": "..."
-      # }
+      # AWS AUTHENTICATION
       # ----------------------------------------------------------
       - name: Configure AWS credentials
         env:
@@ -89,9 +88,11 @@ jobs:
           access_key = credentials.get(
               "aws_access_key_id"
           )
+
           secret_key = credentials.get(
               "aws_secret_access_key"
           )
+
           session_token = credentials.get(
               "aws_session_token"
           )
@@ -140,7 +141,7 @@ jobs:
           PYEOF
 
       # ----------------------------------------------------------
-      # Pull training data from S3 using DVC
+      # DVC PULL FROM S3
       # ----------------------------------------------------------
       - name: Pull training data with DVC
         run: |
@@ -149,97 +150,64 @@ jobs:
             data/holdout.csv.dvc
 
       # ----------------------------------------------------------
-      # Train model
+      # BONUS 1: DAGSHUB / REMOTE MLFLOW
+      # ----------------------------------------------------------
+      - name: Configure optional DagsHub tracking
+        env:
+          DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+        run: |
+          if [[ -n "$DAGSHUB_USERNAME" && -n "$DAGSHUB_TOKEN" ]]; then
+
+            echo "::add-mask::$DAGSHUB_TOKEN"
+
+            {
+              printf 'MLFLOW_TRACKING_URI=https://dagshub.com/%s.mlflow\n' "$GITHUB_REPOSITORY"
+              printf 'MLFLOW_TRACKING_USERNAME=%s\n' "$DAGSHUB_USERNAME"
+              printf 'MLFLOW_TRACKING_PASSWORD=%s\n' "$DAGSHUB_TOKEN"
+            } >> "$GITHUB_ENV"
+
+            echo "DagsHub MLflow tracking configured."
+
+          elif [[ -z "$DAGSHUB_USERNAME" && -z "$DAGSHUB_TOKEN" ]]; then
+
+            echo "DagsHub secrets are not configured; using local MLflow tracking."
+
+          else
+
+            echo "Set both DAGSHUB_USERNAME and DAGSHUB_TOKEN secrets." >&2
+            exit 1
+
+          fi
+
+      # ----------------------------------------------------------
+      # TRAIN MODEL
       # ----------------------------------------------------------
       - name: Train model
         run: python src/train.py
 
       # ----------------------------------------------------------
-      # Read F1 from outputs/report.json
+      # BONUS 3: PRECISION / RECALL / CONFUSION MATRIX
       # ----------------------------------------------------------
-      - name: Read F1 score
-        id: read_report
-        run: |
-          python - <<'PYEOF'
-          import json
-          import math
-          import os
-
-          with open(
-              "outputs/report.json",
-              encoding="utf-8"
-          ) as report_file:
-              report = json.load(report_file)
-
-          f1 = float(report["f1_score"])
-
-          if not math.isfinite(f1):
-              raise SystemExit(
-                  f"Invalid f1_score: {f1}"
-              )
-
-          if not 0.0 <= f1 <= 1.0:
-              raise SystemExit(
-                  f"f1_score outside [0,1]: {f1}"
-              )
-
-          with open(
-              os.environ["GITHUB_OUTPUT"],
-              "a",
-              encoding="utf-8"
-          ) as output_file:
-              output_file.write(
-                  f"f1={f1:.10f}\n"
-              )
-
-          print(
-              f"Training f1_score: {f1:.4f}"
-          )
-          PYEOF
+      - name: Print class metrics and confusion matrix
+        run: cat outputs/detail.txt
 
       # ----------------------------------------------------------
-      # Upload trained model to S3
+      # SAVE CANDIDATE
       #
-      # s3://bucket/artifacts/current/model.joblib
+      # Model CHƯA được đưa lên production ở bước này.
+      # Quality Gate phải pass trước.
       # ----------------------------------------------------------
-      - name: Upload model to S3
-        run: |
-          python - <<'PYEOF'
-          import os
-          import boto3
-
-          bucket = os.environ[
-              "ARTIFACT_BUCKET"
-          ]
-
-          key = (
-              "artifacts/current/"
-              "model.joblib"
-          )
-
-          s3 = boto3.client("s3")
-
-          s3.upload_file(
-              "models/model.joblib",
-              bucket,
-              key
-          )
-
-          print(
-              f"Uploaded model to "
-              f"s3://{bucket}/{key}"
-          )
-          PYEOF
-
-      # ----------------------------------------------------------
-      # Save report in GitHub Actions
-      # ----------------------------------------------------------
-      - name: Save report as artifact
+      - name: Save candidate artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: report
-          path: outputs/report.json
+          name: candidate
+          path: |
+            models/model.joblib
+            outputs/report.json
+            outputs/detail.txt
           if-no-files-found: error
+          retention-days: 7
 
   # ============================================================
   # JOB 3: QUALITY GATE
@@ -249,40 +217,113 @@ jobs:
     needs: train
     runs-on: ubuntu-latest
 
+    env:
+      ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+      AWS_DEFAULT_REGION: ap-southeast-2
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Check F1 quality gate
+      - name: Install S3 client
+        run: pip install boto3
+
+      # ----------------------------------------------------------
+      # AWS AUTHENTICATION
+      #
+      # Job này là runner mới nên phải cấu hình lại.
+      # ----------------------------------------------------------
+      - name: Configure AWS credentials
         env:
-          F1_SCORE: ${{ needs.train.outputs.f1 }}
+          STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
         run: |
           python - <<'PYEOF'
+          import json
           import os
 
-          f1 = float(
-              os.environ["F1_SCORE"]
+          credentials = json.loads(
+              os.environ["STORAGE_CREDENTIALS"]
           )
 
-          threshold = 0.65
+          access_key = credentials.get(
+              "aws_access_key_id"
+          )
 
-          if f1 < threshold:
+          secret_key = credentials.get(
+              "aws_secret_access_key"
+          )
+
+          session_token = credentials.get(
+              "aws_session_token"
+          )
+
+          if not access_key:
               raise SystemExit(
-                  f"FAILED: f1_score "
-                  f"{f1:.4f} < "
-                  f"{threshold:.2f}. "
-                  f"Release blocked."
+                  "Missing aws_access_key_id"
               )
 
-          print(
-              f"PASSED: f1_score "
-              f"{f1:.4f} >= "
-              f"{threshold:.2f}. "
-              f"Deploying model."
-          )
+          if not secret_key:
+              raise SystemExit(
+                  "Missing aws_secret_access_key"
+              )
+
+          print(f"::add-mask::{access_key}")
+          print(f"::add-mask::{secret_key}")
+
+          with open(
+              os.environ["GITHUB_ENV"],
+              "a",
+              encoding="utf-8"
+          ) as env_file:
+
+              env_file.write(
+                  f"AWS_ACCESS_KEY_ID={access_key}\n"
+              )
+
+              env_file.write(
+                  f"AWS_SECRET_ACCESS_KEY={secret_key}\n"
+              )
+
+              env_file.write(
+                  "AWS_DEFAULT_REGION=ap-southeast-2\n"
+              )
+
+              if session_token:
+                  print(
+                      f"::add-mask::{session_token}"
+                  )
+
+                  env_file.write(
+                      f"AWS_SESSION_TOKEN={session_token}\n"
+                  )
+
+          print("AWS credentials configured.")
           PYEOF
+
+      # ----------------------------------------------------------
+      # DOWNLOAD CANDIDATE FROM TRAIN JOB
+      # ----------------------------------------------------------
+      - name: Download candidate artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate
+          path: candidate
+
+      # ----------------------------------------------------------
+      # QUALITY GATE
+      #
+      # - F1 >= 0.65
+      # - Bonus rollback: so với model production hiện tại
+      # ----------------------------------------------------------
+      - name: Check minimum F1 and rollback gate
+        env:
+          REPORT_PATH: candidate/outputs/report.json
+        run: python -m scripts.check_quality_gate
 
   # ============================================================
   # JOB 4: RELEASE
@@ -292,7 +333,131 @@ jobs:
     needs: quality-gate
     runs-on: ubuntu-latest
 
+    env:
+      ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+      AWS_DEFAULT_REGION: ap-southeast-2
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install S3 client
+        run: pip install boto3
+
+      # ----------------------------------------------------------
+      # AWS AUTHENTICATION
+      #
+      # Release cũng là runner riêng nên cần cấu hình lại.
+      # ----------------------------------------------------------
+      - name: Configure AWS credentials
+        env:
+          STORAGE_CREDENTIALS: ${{ secrets.STORAGE_CREDENTIALS }}
+        run: |
+          python - <<'PYEOF'
+          import json
+          import os
+
+          credentials = json.loads(
+              os.environ["STORAGE_CREDENTIALS"]
+          )
+
+          access_key = credentials.get(
+              "aws_access_key_id"
+          )
+
+          secret_key = credentials.get(
+              "aws_secret_access_key"
+          )
+
+          session_token = credentials.get(
+              "aws_session_token"
+          )
+
+          if not access_key:
+              raise SystemExit(
+                  "Missing aws_access_key_id"
+              )
+
+          if not secret_key:
+              raise SystemExit(
+                  "Missing aws_secret_access_key"
+              )
+
+          print(f"::add-mask::{access_key}")
+          print(f"::add-mask::{secret_key}")
+
+          with open(
+              os.environ["GITHUB_ENV"],
+              "a",
+              encoding="utf-8"
+          ) as env_file:
+
+              env_file.write(
+                  f"AWS_ACCESS_KEY_ID={access_key}\n"
+              )
+
+              env_file.write(
+                  f"AWS_SECRET_ACCESS_KEY={secret_key}\n"
+              )
+
+              env_file.write(
+                  "AWS_DEFAULT_REGION=ap-southeast-2\n"
+              )
+
+              if session_token:
+                  print(
+                      f"::add-mask::{session_token}"
+                  )
+
+                  env_file.write(
+                      f"AWS_SESSION_TOKEN={session_token}\n"
+                  )
+
+          print("AWS credentials configured.")
+          PYEOF
+
+      # ----------------------------------------------------------
+      # DOWNLOAD MODEL APPROVED BY QUALITY GATE
+      # ----------------------------------------------------------
+      - name: Download gate-approved artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate
+          path: candidate
+
+      # ----------------------------------------------------------
+      # UPDATE serve.py ON EC2
+      # ----------------------------------------------------------
+      - name: Update serving code on VM
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+
+          source: src/serve.py
+          target: /home/${{ secrets.SERVER_USER }}/src
+          strip_components: 1
+
+      # ----------------------------------------------------------
+      # PUBLISH APPROVED MODEL + REPORT TO S3
+      #
+      # artifacts/current/model.joblib
+      # artifacts/current/report.json
+      # ----------------------------------------------------------
+      - name: Publish model bundle and current report to S3
+        env:
+          ARTIFACT_ROOT: candidate
+        run: python -m scripts.publish_artifacts
+
+      # ----------------------------------------------------------
+      # DEPLOY / RESTART FASTAPI
+      # ----------------------------------------------------------
       - name: Restart service and check health
         uses: appleboy/ssh-action@v1.0.3
         with:

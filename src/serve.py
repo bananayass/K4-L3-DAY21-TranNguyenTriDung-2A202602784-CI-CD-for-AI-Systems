@@ -25,7 +25,19 @@ def download_model():
 
 
 download_model()
-model = joblib.load(MODEL_PATH)
+model_artifact = joblib.load(MODEL_PATH)
+if isinstance(model_artifact, dict) and "model" in model_artifact:
+    model = model_artifact["model"]
+    decision_threshold = float(model_artifact.get("decision_threshold", 0.5))
+else:
+    # Support model files created before threshold bundles were introduced.
+    model = model_artifact
+    decision_threshold = 0.5
+
+if not 0.0 <= decision_threshold <= 1.0:
+    raise ValueError(
+        f"Invalid decision threshold in model artifact: {decision_threshold}"
+    )
 
 
 class ScoreRequest(BaseModel):
@@ -61,7 +73,17 @@ def score(req: ScoreRequest):
             detail="Expected 10 features (adult income)",
         )
 
-    prediction = int(model.predict([req.features])[0])
+    if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
+        classes = list(model.classes_)
+        if 1 not in classes:
+            raise RuntimeError("Loaded model does not contain positive class 1")
+        positive_probability = model.predict_proba([req.features])[0][
+            classes.index(1)
+        ]
+        prediction = int(positive_probability >= decision_threshold)
+    else:
+        prediction = int(model.predict([req.features])[0])
+
     label = "thu_nhap_cao" if prediction == 1 else "thu_nhap_thap"
     return {"prediction": prediction, "label": label}
 
